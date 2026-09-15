@@ -3,7 +3,6 @@ FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Install FFmpeg and basic tools
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ffmpeg \
@@ -27,6 +26,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
+COPY test.html .
 
 EXPOSE 10000
 
