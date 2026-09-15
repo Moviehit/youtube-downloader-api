@@ -1,333 +1,132 @@
 import os
-import json
+import re
 import uuid
-import shutil
 import subprocess
+from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify, send_file
 
 app = Flask(__name__)
 
-DOWNLOAD_DIR = "/tmp/ytdlp_downloads"
-
-SECRET_COOKIES = "/etc/secrets/cookies.txt"
-RUNTIME_COOKIES = "/tmp/ytdlp_cookies.txt"
-
-YTDLP = "yt-dlp"
+DOWNLOAD_DIR = "/tmp/downloads"
 FFMPEG = "ffmpeg"
+
+# Render Environment Variable me ye set karna:
+# RENDER_API_KEY = apna-secret-key
+API_KEY = os.environ.get("RENDER_API_KEY", "")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-# --------------------------------------------------
-# Prepare writable cookies file
-# --------------------------------------------------
+def check_api_key():
+    if not API_KEY:
+        return True
 
-def prepare_cookies():
+    key = request.headers.get("X-API-Key", "")
 
-    if not os.path.isfile(SECRET_COOKIES):
-        return None
+    return key == API_KEY
+
+
+def allowed_stream_url(url):
+    """
+    Sirf YouTube/Google video stream URLs allow karo.
+    Isse Render ko arbitrary URL downloader banne se roka jata hai.
+    """
+
+    if not url:
+        return False
 
     try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
 
-        shutil.copyfile(
-            SECRET_COOKIES,
-            RUNTIME_COOKIES
+        allowed = (
+            host.endswith(".googlevideo.com")
+            or host == "googlevideo.com"
+            or host.endswith(".youtube.com")
+            or host == "youtube.com"
         )
 
-        return RUNTIME_COOKIES
+        return p.scheme == "https" and allowed
 
     except Exception:
-        return None
+        return False
 
 
-# --------------------------------------------------
-# Run yt-dlp information
-# --------------------------------------------------
+def safe_filename(name):
+    if not name:
+        name = "youtube-video"
 
-def run_ytdlp(url):
+    name = re.sub(r'[\\/:*?"<>|]+', "", name)
+    name = re.sub(r"\s+", " ", name).strip()
 
-    cookies = prepare_cookies()
+    if not name:
+        name = "youtube-video"
 
-    cmd = [
-        YTDLP,
+    return name[:150]
 
-        "--dump-single-json",
-        "--skip-download",
-        "--no-playlist",
-        "--no-warnings",
 
-        "--js-runtimes",
-        "deno"
-    ]
-
-    if cookies:
-
-        cmd.extend([
-            "--cookies",
-            cookies
-        ])
-
-    cmd.append(url)
-
-    result = subprocess.run(
-        cmd,
+def run_ffmpeg(args):
+    process = subprocess.run(
+        args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=180
+        timeout=900
     )
 
-    if result.returncode != 0:
+    return process.returncode, process.stdout, process.stderr
 
-        raise Exception(
-            result.stderr[-5000:]
-        )
-
-    return json.loads(
-        result.stdout
-    )
-
-
-# --------------------------------------------------
-# HOME
-# --------------------------------------------------
 
 @app.get("/")
 def home():
-
     return jsonify({
-        "status": "ok",
-        "service": "YouTube Downloader API",
-        "version": "1.1"
+        "success": True,
+        "service": "YouTube Stream Downloader",
+        "status": "online"
     })
 
 
-# --------------------------------------------------
-# HEALTH
-# --------------------------------------------------
-
 @app.get("/health")
 def health():
-
     return jsonify({
         "status": "healthy"
     })
 
 
-# --------------------------------------------------
-# TEST PAGE
-# --------------------------------------------------
-
-@app.get("/test")
-def test_page():
-
-    test_file = "/app/test.html"
-
-    if not os.path.exists(test_file):
-
-        return jsonify({
-            "success": False,
-            "error": "test.html not found"
-        }), 404
-
-    with open(
-        test_file,
-        "r",
-        encoding="utf-8"
-    ) as file:
-
-        return file.read()
-
-
-# --------------------------------------------------
-# VIDEO INFO
-# --------------------------------------------------
-
-@app.post("/info")
-def info():
-
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-    url = data.get(
-        "url",
-        ""
-    ).strip()
-
-    if not url:
-
-        return jsonify({
-            "success": False,
-            "error": "YouTube URL is required"
-        }), 400
-
-    try:
-
-        info_data = run_ytdlp(url)
-
-        heights = set()
-
-        audio_available = False
-
-        for fmt in info_data.get(
-            "formats",
-            []
-        ):
-
-            height = fmt.get(
-                "height"
-            )
-
-            vcodec = fmt.get(
-                "vcodec"
-            )
-
-            acodec = fmt.get(
-                "acodec"
-            )
-
-            if (
-                height
-                and vcodec
-                and vcodec != "none"
-            ):
-
-                try:
-
-                    heights.add(
-                        int(height)
-                    )
-
-                except:
-                    pass
-
-            if (
-                acodec
-                and acodec != "none"
-            ):
-
-                audio_available = True
-
-        qualities = sorted(
-            heights,
-            reverse=True
-        )
-
-        return jsonify({
-
-            "success": True,
-
-            "title": info_data.get(
-                "title"
-            ),
-
-            "channel": (
-                info_data.get("channel")
-                or info_data.get("uploader")
-            ),
-
-            "thumbnail": info_data.get(
-                "thumbnail"
-            ),
-
-            "duration": info_data.get(
-                "duration"
-            ),
-
-            "qualities": qualities,
-
-            "audio_available":
-                audio_available,
-
-            "cookies_enabled":
-                os.path.isfile(
-                    SECRET_COOKIES
-                )
-
-        })
-
-    except subprocess.TimeoutExpired:
-
-        return jsonify({
-            "success": False,
-            "error":
-                "Information request timed out"
-        }), 504
-
-    except Exception as e:
-
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-# --------------------------------------------------
-# VIDEO DOWNLOAD
-# --------------------------------------------------
-
 @app.post("/download")
 def download():
 
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-    url = data.get(
-        "url",
-        ""
-    ).strip()
-
-    quality = data.get(
-        "quality"
-    )
-
-    if not url:
-
+    if not check_api_key():
         return jsonify({
             "success": False,
-            "error":
-                "YouTube URL is required"
-        }), 400
+            "error": "Unauthorized"
+        }), 401
 
-    try:
+    data = request.get_json(silent=True) or {}
 
-        quality = int(
-            quality
-        )
+    video_url = data.get("video_url", "")
+    audio_url = data.get("audio_url", "")
+    filename = safe_filename(data.get("filename", "youtube-video"))
+    quality = str(data.get("quality", ""))
 
-    except:
-
+    if not video_url:
         return jsonify({
             "success": False,
-            "error":
-                "Invalid quality"
+            "error": "video_url is required"
         }), 400
 
-    allowed_qualities = [
-        144,
-        240,
-        360,
-        480,
-        720,
-        1080,
-        1440,
-        2160
-    ]
-
-    if quality not in allowed_qualities:
-
+    if not allowed_stream_url(video_url):
         return jsonify({
             "success": False,
-            "error":
-                "Unsupported quality"
+            "error": "Invalid video stream URL"
         }), 400
 
-    # --------------------------------------------------
-    # Create job folder
-    # --------------------------------------------------
+    if audio_url and not allowed_stream_url(audio_url):
+        return jsonify({
+            "success": False,
+            "error": "Invalid audio stream URL"
+        }), 400
 
     job_id = uuid.uuid4().hex
 
@@ -336,234 +135,213 @@ def download():
         job_id
     )
 
-    os.makedirs(
+    os.makedirs(job_dir, exist_ok=True)
+
+    video_file = os.path.join(
         job_dir,
-        exist_ok=True
+        "video_stream"
     )
 
-    output_template = os.path.join(
+    audio_file = os.path.join(
         job_dir,
-        "video_%(height)sp.%(ext)s"
+        "audio_stream"
     )
 
-    # --------------------------------------------------
-    # Prepare cookies
-    # --------------------------------------------------
-
-    cookies = prepare_cookies()
-
-    # --------------------------------------------------
-    # Format selection
-    #
-    # Exact quality first.
-    # If unavailable, choose nearest lower quality.
-    # --------------------------------------------------
-
-    format_selector = (
-        f"bestvideo[height={quality}]"
-        f"+bestaudio/"
-        f"bestvideo[height<={quality}]"
-        f"+bestaudio/"
-        f"best[height<={quality}]"
-        f"/best"
+    output_file = os.path.join(
+        job_dir,
+        filename + ".mp4"
     )
 
-    cmd = [
-
-        YTDLP,
-
-        "--no-playlist",
-        "--no-warnings",
-
-        "--js-runtimes",
-        "deno"
-    ]
-
-    if cookies:
-
-        cmd.extend([
-            "--cookies",
-            cookies
-        ])
-
-    cmd.extend([
-
-        "-f",
-        format_selector,
-
-        "--merge-output-format",
-        "mp4",
-
-        "--ffmpeg-location",
-        FFMPEG,
-
-        "-o",
-        output_template,
-
-        url
-    ])
+    headers = (
+        "User-Agent: Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/147.0.0.0 Safari/537.36\r\n"
+        "Referer: https://www.youtube.com/\r\n"
+    )
 
     try:
 
-        result = subprocess.run(
+        # -------------------------------------------------
+        # CASE 1
+        # Progressive stream
+        # Video + Audio already together
+        # -------------------------------------------------
 
-            cmd,
+        if not audio_url:
 
-            stdout=subprocess.PIPE,
+            ffmpeg_cmd = [
+                FFMPEG,
+                "-y",
 
-            stderr=subprocess.PIPE,
+                "-headers",
+                headers,
 
-            text=True,
+                "-i",
+                video_url,
 
-            timeout=3600
-        )
+                "-c",
+                "copy",
 
-        if result.returncode != 0:
+                "-movflags",
+                "+faststart",
 
-            error_message = (
-                result.stderr[-5000:]
-                or result.stdout[-5000:]
-            )
+                output_file
+            ]
 
-            shutil.rmtree(
-                job_dir,
-                ignore_errors=True
-            )
+            code, stdout, stderr = run_ffmpeg(ffmpeg_cmd)
+
+        # -------------------------------------------------
+        # CASE 2
+        # Adaptive stream
+        # Video + separate Audio
+        # -------------------------------------------------
+
+        else:
+
+            # Download video
+            video_cmd = [
+                FFMPEG,
+                "-y",
+
+                "-headers",
+                headers,
+
+                "-i",
+                video_url,
+
+                "-c",
+                "copy",
+
+                video_file
+            ]
+
+            code, stdout, stderr = run_ffmpeg(video_cmd)
+
+            if code != 0:
+                return jsonify({
+                    "success": False,
+                    "error": "Video stream download failed",
+                    "details": stderr[-4000:]
+                }), 500
+
+            # Download audio
+            audio_cmd = [
+                FFMPEG,
+                "-y",
+
+                "-headers",
+                headers,
+
+                "-i",
+                audio_url,
+
+                "-c",
+                "copy",
+
+                audio_file
+            ]
+
+            code, stdout, stderr = run_ffmpeg(audio_cmd)
+
+            if code != 0:
+                return jsonify({
+                    "success": False,
+                    "error": "Audio stream download failed",
+                    "details": stderr[-4000:]
+                }), 500
+
+            # Merge
+            merge_cmd = [
+                FFMPEG,
+                "-y",
+
+                "-i",
+                video_file,
+
+                "-i",
+                audio_file,
+
+                "-map",
+                "0:v:0",
+
+                "-map",
+                "1:a:0",
+
+                "-c:v",
+                "copy",
+
+                "-c:a",
+                "aac",
+
+                "-b:a",
+                "128k",
+
+                "-movflags",
+                "+faststart",
+
+                output_file
+            ]
+
+            code, stdout, stderr = run_ffmpeg(merge_cmd)
+
+        if code != 0:
 
             return jsonify({
-
                 "success": False,
-
-                "error": error_message
-
+                "error": "FFmpeg failed",
+                "details": stderr[-5000:]
             }), 500
 
-        # --------------------------------------------------
-        # Find output
-        # --------------------------------------------------
-
-        files = os.listdir(
-            job_dir
-        )
-
-        file_path = None
-
-        for filename in files:
-
-            full_path = os.path.join(
-                job_dir,
-                filename
-            )
-
-            if os.path.isfile(
-                full_path
-            ):
-
-                file_path = full_path
-
-                break
-
-        if not file_path:
-
-            shutil.rmtree(
-                job_dir,
-                ignore_errors=True
-            )
+        if not os.path.isfile(output_file):
 
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "Download file was not created"
-
+                "error": "Output file was not created"
             }), 500
 
-        # --------------------------------------------------
-        # Send file
-        # --------------------------------------------------
+        if os.path.getsize(output_file) < 1000:
 
-        response = send_file(
+            return jsonify({
+                "success": False,
+                "error": "Output file is empty"
+            }), 500
 
-            file_path,
-
+        return send_file(
+            output_file,
+            mimetype="video/mp4",
             as_attachment=True,
-
-            download_name=
-                f"video_{quality}p.mp4"
+            download_name=filename + ".mp4"
         )
-
-        # --------------------------------------------------
-        # Delete after download
-        # --------------------------------------------------
-
-        @response.call_on_close
-        def cleanup():
-
-            shutil.rmtree(
-                job_dir,
-                ignore_errors=True
-            )
-
-            try:
-
-                if os.path.exists(
-                    RUNTIME_COOKIES
-                ):
-
-                    os.remove(
-                        RUNTIME_COOKIES
-                    )
-
-            except:
-                pass
-
-        return response
 
     except subprocess.TimeoutExpired:
 
-        shutil.rmtree(
-            job_dir,
-            ignore_errors=True
-        )
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Download timed out"
-
+            "error": "Download timed out"
         }), 504
 
     except Exception as e:
 
-        shutil.rmtree(
-            job_dir,
-            ignore_errors=True
-        )
-
         return jsonify({
-
             "success": False,
-
             "error": str(e)
-
         }), 500
 
+    finally:
 
-# --------------------------------------------------
-# START SERVER
-# --------------------------------------------------
+        # Cleanup
+        try:
+            import shutil
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
-    )
+    port = int(os.environ.get("PORT", 10000))
 
     app.run(
         host="0.0.0.0",
