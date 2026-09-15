@@ -8,12 +8,10 @@ from flask import Flask, request, jsonify, send_file
 
 app = Flask(__name__)
 
-# --------------------------------------------------
-# CONFIGURATION
-# --------------------------------------------------
-
 DOWNLOAD_DIR = "/tmp/ytdlp_downloads"
-COOKIES_FILE = "/etc/secrets/cookies.txt"
+
+SECRET_COOKIES = "/etc/secrets/cookies.txt"
+RUNTIME_COOKIES = "/tmp/ytdlp_cookies.txt"
 
 YTDLP = "yt-dlp"
 FFMPEG = "ffmpeg"
@@ -22,18 +20,34 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
 # --------------------------------------------------
-# Helper: Check cookies
+# Prepare writable cookies file
 # --------------------------------------------------
 
-def cookies_available():
-    return os.path.isfile(COOKIES_FILE)
+def prepare_cookies():
+
+    if not os.path.isfile(SECRET_COOKIES):
+        return None
+
+    try:
+
+        shutil.copyfile(
+            SECRET_COOKIES,
+            RUNTIME_COOKIES
+        )
+
+        return RUNTIME_COOKIES
+
+    except Exception:
+        return None
 
 
 # --------------------------------------------------
-# Helper: Run yt-dlp
+# Run yt-dlp information
 # --------------------------------------------------
 
 def run_ytdlp(url):
+
+    cookies = prepare_cookies()
 
     cmd = [
         YTDLP,
@@ -44,14 +58,14 @@ def run_ytdlp(url):
         "--no-warnings",
 
         "--js-runtimes",
-        "deno",
+        "deno"
     ]
 
-    # Add cookies only when Secret File exists
-    if cookies_available():
+    if cookies:
+
         cmd.extend([
             "--cookies",
-            COOKIES_FILE
+            cookies
         ])
 
     cmd.append(url)
@@ -65,11 +79,14 @@ def run_ytdlp(url):
     )
 
     if result.returncode != 0:
+
         raise Exception(
             result.stderr[-5000:]
         )
 
-    return json.loads(result.stdout)
+    return json.loads(
+        result.stdout
+    )
 
 
 # --------------------------------------------------
@@ -82,12 +99,12 @@ def home():
     return jsonify({
         "status": "ok",
         "service": "YouTube Downloader API",
-        "version": "1.0"
+        "version": "1.1"
     })
 
 
 # --------------------------------------------------
-# HEALTH CHECK
+# HEALTH
 # --------------------------------------------------
 
 @app.get("/health")
@@ -114,26 +131,17 @@ def test_page():
             "error": "test.html not found"
         }), 404
 
-    try:
+    with open(
+        test_file,
+        "r",
+        encoding="utf-8"
+    ) as file:
 
-        with open(
-            test_file,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            return file.read()
-
-    except Exception as e:
-
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        return file.read()
 
 
 # --------------------------------------------------
-# YOUTUBE INFO
+# VIDEO INFO
 # --------------------------------------------------
 
 @app.post("/info")
@@ -163,12 +171,10 @@ def info():
 
         audio_available = False
 
-        formats = info_data.get(
+        for fmt in info_data.get(
             "formats",
             []
-        )
-
-        for fmt in formats:
+        ):
 
             height = fmt.get(
                 "height"
@@ -182,7 +188,6 @@ def info():
                 "acodec"
             )
 
-            # Video
             if (
                 height
                 and vcodec
@@ -195,11 +200,9 @@ def info():
                         int(height)
                     )
 
-                except (ValueError, TypeError):
-
+                except:
                     pass
 
-            # Audio
             if (
                 acodec
                 and acodec != "none"
@@ -239,7 +242,9 @@ def info():
                 audio_available,
 
             "cookies_enabled":
-                cookies_available()
+                os.path.isfile(
+                    SECRET_COOKIES
+                )
 
         })
 
@@ -247,7 +252,8 @@ def info():
 
         return jsonify({
             "success": False,
-            "error": "YouTube information request timed out"
+            "error":
+                "Information request timed out"
         }), 504
 
     except Exception as e:
@@ -278,20 +284,13 @@ def download():
         "quality"
     )
 
-    # -----------------------------
-    # URL validation
-    # -----------------------------
-
     if not url:
 
         return jsonify({
             "success": False,
-            "error": "YouTube URL is required"
+            "error":
+                "YouTube URL is required"
         }), 400
-
-    # -----------------------------
-    # Quality validation
-    # -----------------------------
 
     try:
 
@@ -299,11 +298,12 @@ def download():
             quality
         )
 
-    except (ValueError, TypeError):
+    except:
 
         return jsonify({
             "success": False,
-            "error": "Invalid quality"
+            "error":
+                "Invalid quality"
         }), 400
 
     allowed_qualities = [
@@ -321,12 +321,13 @@ def download():
 
         return jsonify({
             "success": False,
-            "error": "Unsupported quality"
+            "error":
+                "Unsupported quality"
         }), 400
 
-    # -----------------------------
-    # Create temporary job folder
-    # -----------------------------
+    # --------------------------------------------------
+    # Create job folder
+    # --------------------------------------------------
 
     job_id = uuid.uuid4().hex
 
@@ -342,12 +343,30 @@ def download():
 
     output_template = os.path.join(
         job_dir,
-        f"video_{quality}p.%(ext)s"
+        "video_%(height)sp.%(ext)s"
     )
 
-    # -----------------------------
-    # yt-dlp command
-    # -----------------------------
+    # --------------------------------------------------
+    # Prepare cookies
+    # --------------------------------------------------
+
+    cookies = prepare_cookies()
+
+    # --------------------------------------------------
+    # Format selection
+    #
+    # Exact quality first.
+    # If unavailable, choose nearest lower quality.
+    # --------------------------------------------------
+
+    format_selector = (
+        f"bestvideo[height={quality}]"
+        f"+bestaudio/"
+        f"bestvideo[height<={quality}]"
+        f"+bestaudio/"
+        f"best[height<={quality}]"
+        f"/best"
+    )
 
     cmd = [
 
@@ -357,34 +376,20 @@ def download():
         "--no-warnings",
 
         "--js-runtimes",
-        "deno",
-
+        "deno"
     ]
 
-    # -----------------------------
-    # Cookies
-    # -----------------------------
-
-    if cookies_available():
+    if cookies:
 
         cmd.extend([
             "--cookies",
-            COOKIES_FILE
+            cookies
         ])
-
-    # -----------------------------
-    # Format
-    # -----------------------------
 
     cmd.extend([
 
         "-f",
-
-        (
-            f"bestvideo[height={quality}]"
-            f"+bestaudio/"
-            f"best[height={quality}]"
-        ),
+        format_selector,
 
         "--merge-output-format",
         "mp4",
@@ -397,10 +402,6 @@ def download():
 
         url
     ])
-
-    # -----------------------------
-    # Execute
-    # -----------------------------
 
     try:
 
@@ -416,10 +417,6 @@ def download():
 
             timeout=3600
         )
-
-        # -------------------------
-        # Error
-        # -------------------------
 
         if result.returncode != 0:
 
@@ -441,9 +438,9 @@ def download():
 
             }), 500
 
-        # -------------------------
-        # Find generated file
-        # -------------------------
+        # --------------------------------------------------
+        # Find output
+        # --------------------------------------------------
 
         files = os.listdir(
             job_dir
@@ -466,10 +463,6 @@ def download():
 
                 break
 
-        # -------------------------
-        # File not found
-        # -------------------------
-
         if not file_path:
 
             shutil.rmtree(
@@ -486,9 +479,9 @@ def download():
 
             }), 500
 
-        # -------------------------
+        # --------------------------------------------------
         # Send file
-        # -------------------------
+        # --------------------------------------------------
 
         response = send_file(
 
@@ -500,9 +493,9 @@ def download():
                 f"video_{quality}p.mp4"
         )
 
-        # -------------------------
-        # Cleanup after download
-        # -------------------------
+        # --------------------------------------------------
+        # Delete after download
+        # --------------------------------------------------
 
         @response.call_on_close
         def cleanup():
@@ -512,11 +505,20 @@ def download():
                 ignore_errors=True
             )
 
-        return response
+            try:
 
-    # -----------------------------
-    # Timeout
-    # -----------------------------
+                if os.path.exists(
+                    RUNTIME_COOKIES
+                ):
+
+                    os.remove(
+                        RUNTIME_COOKIES
+                    )
+
+            except:
+                pass
+
+        return response
 
     except subprocess.TimeoutExpired:
 
@@ -533,10 +535,6 @@ def download():
                 "Download timed out"
 
         }), 504
-
-    # -----------------------------
-    # General error
-    # -----------------------------
 
     except Exception as e:
 
@@ -568,8 +566,6 @@ if __name__ == "__main__":
     )
 
     app.run(
-
         host="0.0.0.0",
-
         port=port
     )
