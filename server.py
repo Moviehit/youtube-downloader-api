@@ -20,16 +20,18 @@ FFMPEG = "ffmpeg"
 # --------------------------------------------------
 
 def run_ytdlp(url):
-    cmd = [
-        YTDLP,
-        "--dump-single-json",
-        "--skip-download",
-        "--no-playlist",
-        "--no-warnings",
-        "--js-runtimes",
-        "deno",
-        url
-    ]
+   cmd = [
+    YTDLP,
+    "--dump-single-json",
+    "--skip-download",
+    "--no-playlist",
+    "--no-warnings",
+    "--js-runtimes",
+    "deno",
+    "--extractor-args",
+    "youtube:player_client=android_vr,web_embedded",
+    url
+]
 
     result = subprocess.run(
         cmd,
